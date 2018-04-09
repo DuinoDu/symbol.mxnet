@@ -69,9 +69,9 @@ def stacked_hourglass(data, npk, npl, num_features=256, num_stacks=8, mode='test
         conv6 = conv(hg, 'conv6_%d'%stack_ind, num_features)
         conv7 = conv(conv6, 'conv7_%d'%stack_ind, num_features, kernel_shape=(1,1))
 
-        predicts  += [conv(conv7, 'out_%d'%stack_ind, npk+1+2*npl, kernel_shape=(1,1), relu=False)]
-        keypoints += [mx.symbol.slice_axis(data=predicts[-1], axis=1, begin=0, end=npk+1)]
-        limbs     += [mx.symbol.slice_axis(data=predicts[-1], axis=1, begin=npk+1, end=npk+2*npl+1)]
+        predicts  += [conv(conv7, 'out_%d'%stack_ind, npk+2*npl, kernel_shape=(1,1), relu=False)]
+        keypoints += [mx.symbol.slice_axis(data=predicts[-1], axis=1, begin=0, end=npk)]
+        limbs     += [mx.symbol.slice_axis(data=predicts[-1], axis=1, begin=npk, end=npk+2*npl)]
 
         if stack_ind < num_stacks-1:
             inter = inter +\
@@ -101,43 +101,76 @@ def stacked_hourglass(data, npk, npl, num_features=256, num_stacks=8, mode='test
                 loss_L2 += [mx.symbol.MakeLoss(mx.symbol.square(heatweight * (keypoints[i] - heatmap_gt)))]
                 loss_L1 += [mx.symbol.MakeLoss(mx.symbol.square(vecweight * (limbs[i] - partaffinity_gt)))]
 
-        group = mx.symbol.Group(loss_L1 + 
-                                loss_L2 +
+        group = mx.symbol.Group(loss_L2 + 
+                                loss_L1 +
                                 [mx.sym.BlockGrad(keypoints[-1]),
                                  mx.sym.BlockGrad(limbs[-1]),
-                                 mx.sym.BlockGrad(heatmaplabel), 
-                                 mx.sym.BlockGrad(partaffinityglabel),
+                                 mx.sym.BlockGrad(heatmap_gt), 
+                                 mx.sym.BlockGrad(partaffinity_gt),
                                  mx.sym.BlockGrad(heatweight), 
                                  mx.sym.BlockGrad(vecweight)])
     return group
 
 
+import unittest
 
-def test_hourglass():
-    data = mx.sym.Variable(name='data')
-    data_array = mx.nd.zeros((1,3,256,256))
-    net_symbol = hourglass(data, 256,  0)
-    mod = mx.mod.Module(net_symbol, label_names=None)
-    mod.bind(data_shapes=[('data', data_array.shape)])
-    mod.init_params()
-    mod.forward(mx.io.DataBatch([data_array]))
-    print(mod.get_outputs()[0].asnumpy().shape)
-    #mx.viz.plot_network(symbol=net_symbol, shape={'data':data_array.shape}, title='symbol', save_format='jpg').render()
+class MySymbol(unittest.TestCase):
+
+    def test_hourglass(self):
+        data = mx.sym.Variable(name='data')
+        data_shape = (1, 3, 256, 256)
+        data = mx.sym.Variable(name='data')
+        net_symbol = hourglass(data, 256,  0)
+        output_shape = net_symbol.infer_shape(data=data_shape)
+        self.assertEqual(output_shape[1], [(1, 256, 256, 256)])
+
+
+    def test_stacked_hourglass(self):
+        data = mx.sym.Variable(name='data')
+        data_shape = (1, 3, 256, 256)
+        num_keypoints = 16
+        num_limbs = 10
     
+        # test mode
+        net_symbol = stacked_hourglass(data, num_keypoints, num_limbs,  mode='test')
+        output_shape = net_symbol.infer_shape(data=data_shape)
+        self.assertEqual(output_shape[1], [(1, num_keypoints, 64, 64), 
+                                           (1, num_limbs*2, 64, 64)])
+    
+        heatmap_gt_shape = (1, num_keypoints, 64, 64)
+        partaffinity_gt_shape = (1, num_limbs*2, 64, 64)
+        heatweight_shape = (1, num_keypoints, 64, 64)
+        vecweight_shape = (1, num_limbs*2, 64, 64)
+    
+        # train mode 0
+        net_symbol = stacked_hourglass(data, num_keypoints, num_limbs,  mode='train', train_mode=0)
+        output_shape = net_symbol.infer_shape(
+                                    data=data_shape,
+                                    heatmap_gt=heatmap_gt_shape,
+                                    partaffinity_gt=partaffinity_gt_shape,
+                                    heatweight=heatweight_shape,
+                                    vecweight=vecweight_shape)
+        self.assertEqual(len(output_shape[1]), 8*2+6)
+        self.assertEqual(output_shape[1][0], (1, num_keypoints, 64, 64))
 
-def test_stacked_hourglass():
-    data = mx.sym.Variable(name='data')
-    data_array = mx.nd.zeros((1,3,256,256))
-    net_symbol = stacked_hourglass(data, 16, 10, mode='test')
-    mod = mx.mod.Module(net_symbol, label_names=None)
-    mod.bind(data_shapes=[('data', data_array.shape)])
-    mod.init_params()
-    mod.forward(mx.io.DataBatch([data_array]))
-    print(mod.get_outputs()[0].asnumpy().shape)
-    print(mod.get_outputs()[1].asnumpy().shape)
-    #mx.viz.plot_network(symbol=net_symbol, shape={'data':data_array.shape}, title='symbol', save_format='jpg').render()
+        # train mode 1
+        net_symbol = stacked_hourglass(data, num_keypoints, num_limbs,  mode='train', train_mode=1)
+        output_shape = net_symbol.infer_shape(
+                                    data=data_shape,
+                                    heatmap_gt=heatmap_gt_shape,
+                                    partaffinity_gt=partaffinity_gt_shape,
+                                    heatweight=heatweight_shape,
+                                    vecweight=vecweight_shape)
+        self.assertEqual(len(output_shape[1]), 8*2+6)
+        self.assertEqual(output_shape[1][0], (1, num_keypoints, 64, 64))
+        self.assertEqual(output_shape[1][8], (1, num_limbs*2, 64, 64))
+        self.assertEqual(output_shape[1][16], (1, num_keypoints, 64, 64))
+        self.assertEqual(output_shape[1][17], (1, num_limbs*2, 64, 64))
+        self.assertEqual(output_shape[1][18], (1, num_keypoints, 64, 64))
+        self.assertEqual(output_shape[1][19], (1, num_limbs*2, 64, 64))
+        self.assertEqual(output_shape[1][20], (1, num_keypoints, 64, 64))
+        self.assertEqual(output_shape[1][21], (1, num_limbs*2, 64, 64))
 
 
-if __name__ == "__main__":
-    #test_hourglass()
-    test_stacked_hourglass()
+if __name__ == '__main__':
+    unittest.main()    
