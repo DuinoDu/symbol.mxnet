@@ -6,6 +6,6 @@
 ### segmentation
 
 ### keypoint
-- stacked hourglass
+- stacked hourglass [paper](https://arxiv.org/pdf/1603.06937.pdf) [code](hourglass.py)
 
 ### optical flow
